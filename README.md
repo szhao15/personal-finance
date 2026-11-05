@@ -18,18 +18,114 @@ cd server && npm install && npm run dev    # API; seeds server/data/finance.db o
 cd app && npm install && npm run dev       # open http://localhost:5180
 ```
 
-`npm run seed` in `server/` resets the database to fresh demo data. `npm test` runs the logic tests.
+`npm run seed` in `server/` resets the database to fresh demo data (this erases any changes).
+`npm test` in `server/` runs the logic tests.
 
 ## Features
 
-- **Dashboard**: spending this month vs last month, net worth, transactions to review, budgets, bills due soon, investments.
-- **Transactions**: search and filters, edit, categorize (with suggestions from past merchants), tags, notes,
-  split, bulk edit, add manual transactions, CSV export.
-- **Categories and budgets**: parent/child categories, monthly budgets, rollovers, 12-month history.
-- **Recurrings**: rule-based matching, next payment prediction, payment history, auto-detection of untracked subscriptions.
-- **Accounts**: net worth history, balances by type, manual accounts, hide/close.
-- **Investments**: balance and performance over time, allocation, holdings with returns, top movers, per-security charts.
+The app answers three questions: where is my money going, am I on track this month, and what am I worth.
+
+- **Dashboard**: daily check-in. This month's spending against last month, net worth, transactions
+  waiting for review, budget rings per category group, bills due in the next two weeks, and investments.
+- **Transactions**: search and filter (category, account, status, type, tag, dates). Open any transaction
+  to recategorize it (with suggestions based on how you filed that merchant before), edit it, tag it,
+  add notes, split it across categories, or make it recurring. Bulk edit, add manual entries, export to CSV.
+  Marking transfers keeps credit card payments from counting as spending twice.
+- **Categories and budgets**: grouped categories with monthly budgets and spent/left bars. Optional
+  rollovers carry unspent (or overspent) budget into next month. A 12-month chart per category helps
+  set realistic budgets.
+- **Recurrings**: subscriptions and bills with next date, amount, and estimated monthly and yearly cost.
+  Auto-detects repeating charges you aren't tracking yet. Each recurring uses a rule (name contains X,
+  amount between Y and Z) to match future charges.
+- **Accounts**: net worth over time, accounts grouped by type, balance charts, credit utilization.
+  Manual accounts for things no bank reports (home value, car, private loans).
+- **Investments**: portfolio value and return over time, allocation, holdings with gains and losses,
+  top movers, and a price chart per holding.
+- **Settings**: manage tags and export all data.
+
+## Project structure
+
+```
+docs/rea-findings.md   What REA discovered about Copilot (the feature spec)
+web/                   Marketing landing page (not needed for the app)
+server/src/
+  index.ts             Starts the API on port 4000
+  db.ts                Database tables (schema) and date helpers
+  schema.ts            Every query and mutation the API offers
+  resolvers.ts         The code that runs for each query/mutation
+  logic/budget.ts      Spending totals, budgets, rollovers
+  logic/recurring.ts   Recurring rules, next payment, subscription detection
+  logic/history.ts     Net worth, investments, category suggestions
+  seed.ts              Generates the demo data
+  logic.test.ts        Tests
+app/src/
+  main.tsx             Entry point and the list of routes (URL to page)
+  pages/               One file per screen (Dashboard, Transactions, Categories, ...)
+  components/          Layout/sidebar, transaction list and side panel, charts, shared UI
+  lib/api.ts           useGql / useGqlMutation hooks for talking to the API
+  lib/fragments.ts     Shared GraphQL field lists
+  lib/format.ts        Money and date formatting
+  lib/types.ts         TypeScript shapes of the data
+  index.css            All styling
+```
+
+### How it fits together
+
+- **React**: function components and hooks (`useState`, `useEffect`). Pages are wired to URLs in `main.tsx`.
+- **Data fetching**: TanStack Query, wrapped in `lib/api.ts`. `useGql` loads and caches data; `useGqlMutation`
+  sends a change and refreshes cached data so totals everywhere update.
+- **API**: one GraphQL endpoint (`/graphql`). Each page asks for exactly the fields it needs.
+
+A click, end to end:
+
+```
+"Mark as reviewed" (components/transactions.tsx)
+  → useGqlMutation sends editTransaction to /graphql   (app/src/lib/api.ts)
+  → Vite forwards /graphql to port 4000                (app/vite.config.ts)
+  → Mutation.editTransaction runs                      (server/src/resolvers.ts)
+  → SQLite row updated → app refreshes its queries
+```
+
+Suggested reading order: `app/src/main.tsx`, `app/src/pages/Dashboard.tsx`, `app/src/lib/api.ts`,
+`server/src/schema.ts`, `server/src/logic/budget.ts`.
+
+## Data
+
+All data is in one local SQLite file: `server/data/finance.db`. Nothing is hosted online.
+SQLite is built into Node, so there's no database server to install. The `server/data/` folder is
+git-ignored, so your data is never committed.
+
+The demo data (about 14 months: 966 transactions, 8 accounts, 26 categories, investments with daily
+prices) is generated by `server/src/seed.ts` on first run.
+
+Main tables: `accounts`, `balance_history`, `transactions`, `categories`, `budgets`, `recurrings`,
+`tags`, `transaction_tags`, `securities`, `security_prices`, `holdings`.
+
+Conventions: transaction amounts are **positive for money out** and negative for money in
+(paychecks, refunds). Credit card and loan balances are positive amounts owed.
+
+Peek at the data with the `sqlite3` tool that comes with macOS:
+
+```bash
+sqlite3 server/data/finance.db "SELECT date, name, amount FROM transactions ORDER BY date DESC LIMIT 10"
+```
+
+Back up your data by copying `finance.db`.
+
+## Using your own data
+
+There is no import feature yet. Options:
+
+1. **Manual entry (works today)**: add accounts with "Add manual account" and transactions with
+   "Add transaction".
+2. **CSV import (planned)**: load bank and card CSV exports. Maps columns, fixes amount signs,
+   skips duplicates, then auto-categorizes and detects subscriptions. Data stays on your machine.
+3. **Bank syncing (future)**: daily automatic updates through a service like Plaid. Needs login and
+   safer secret handling first.
+
+Don't run `npm run seed` after loading real data: it replaces the database with demo data.
 
 ## Not built (yet)
 
-Bank syncing (uses mock data), login/multiple users, households, goals, and AI chat.
+Bank syncing and CSV import, login and multiple users, households, goals, and AI chat.
+The app has no authentication and is meant to run only on your own machine.
