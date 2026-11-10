@@ -1,35 +1,56 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { Bar, BarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
-  api,
-  money,
-  type Account,
-  type CategoryTotal,
-  type ImportRecord,
-  type Preview,
-  type Transaction,
-} from "./api";
+  UNCATEGORIZED,
+  categoryOf,
+  categoryStats,
+  filterByCategories,
+  formatCents,
+  isoDate,
+  monthlyByCategory,
+  presetRange,
+  prevMonth,
+  spendBy,
+  spendingPace,
+  totalSpent,
+  type Preset,
+  type Range,
+} from "./analytics";
+import { api, money, type Account, type ImportRecord, type Preview, type Transaction } from "./api";
+import { CategoryChart, MerchantChart, PaceChart, TrendChart, categoryColors } from "./Charts";
+import { CategoryFilter, FilterBar } from "./Filters";
 
 type Status = { kind: "error" | "info"; text: string } | null;
 
-function currentMonth() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
+// Set by docker-compose: "prod" when started with ./prod, otherwise the dev copy.
+const isProd = import.meta.env.VITE_APP_ENV === "prod";
+if (!isProd) document.title = "DEV · Personal Finance";
 
 export default function App() {
+  // Import
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [accountId, setAccountId] = useState<number | null>(null);
+  const [importAccountId, setImportAccountId] = useState<number | null>(null);
   const [newAccount, setNewAccount] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<Preview | null>(null);
-  const [month, setMonth] = useState(currentMonth);
-  const [summary, setSummary] = useState<CategoryTotal[]>([]);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [imports, setImports] = useState<ImportRecord[]>([]);
   const [rule, setRule] = useState({ match_text: "", category: "" });
   const [status, setStatus] = useState<Status>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+
+  // Filters (empty account or category list = all)
+  const [accountIds, setAccountIds] = useState<number[]>([]);
+  const [preset, setPreset] = useState<Preset>("3-months");
+  const [custom, setCustom] = useState<Range>(() => presetRange("3-months"));
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+
+  // Data
+  const [allCategories, setAllCategories] = useState<string[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [paceTransactions, setPaceTransactions] = useState<Transaction[]>([]);
+
+  const range = useMemo(() => (preset === "custom" ? custom : presetRange(preset)), [preset, custom]);
+  const rangeError = range.start && range.end && range.start > range.end ? "The start date must be on or before the end date." : null;
+  const paceEnd = range.end ?? isoDate(new Date());
 
   const run = async (action: () => Promise<void>) => {
     try {
@@ -43,48 +64,61 @@ export default function App() {
   const loadAccounts = async () => {
     const list = await api.accounts();
     setAccounts(list);
-    setAccountId((id) => id ?? list[0]?.id ?? null);
+    setImportAccountId((id) => id ?? list[0]?.id ?? null);
   };
 
-  const loadMonth = useCallback(async (m: string) => {
-    const [s, t, i] = await Promise.all([api.summary(m), api.transactions(m), api.imports()]);
-    setSummary(s);
-    setTransactions(t);
-    setImports(i);
-  }, []);
+  const loadData = useCallback(async () => {
+    const [txns, pace, categories, importList] = await Promise.all([
+      rangeError ? Promise.resolve([]) : api.transactions({ ...range, accountIds }),
+      // The pace chart compares the range's last month with the month before it.
+      api.transactions({ start: `${prevMonth(paceEnd.slice(0, 7))}-01`, end: paceEnd, accountIds }),
+      api.categories(),
+      api.imports(),
+    ]);
+    setTransactions(txns);
+    setPaceTransactions(pace);
+    setAllCategories(categories);
+    setImports(importList);
+  }, [range, rangeError, accountIds, paceEnd]);
 
   useEffect(() => {
     run(loadAccounts);
   }, []);
 
   useEffect(() => {
-    run(() => loadMonth(month));
-  }, [month, loadMonth]);
+    run(loadData);
+  }, [loadData]);
+
+  const choosePreset = (next: Preset) => {
+    // Start a custom range from whatever range is showing now.
+    if (next === "custom") setCustom(range.start || range.end ? range : presetRange("3-months"));
+    setPreset(next);
+  };
 
   const addAccount = (e: FormEvent) => {
     e.preventDefault();
     run(async () => {
       const account = await api.createAccount(newAccount.trim());
       setNewAccount("");
-      setAccountId(account.id);
+      setImportAccountId(account.id);
       await loadAccounts();
     });
   };
 
   const showPreview = (e: FormEvent) => {
     e.preventDefault();
-    if (!file || accountId === null) return;
-    run(async () => setPreview(await api.preview(accountId, file)));
+    if (!file || importAccountId === null) return;
+    run(async () => setPreview(await api.preview(importAccountId, file)));
   };
 
   const confirmImport = () => {
-    if (!file || accountId === null) return;
+    if (!file || importAccountId === null) return;
     run(async () => {
-      const result = await api.commit(accountId, file);
+      const result = await api.commit(importAccountId, file);
       setPreview(null);
       setFile(null);
       if (fileInput.current) fileInput.current.value = "";
-      await Promise.all([loadAccounts(), loadMonth(month)]);
+      await Promise.all([loadAccounts(), loadData()]);
       setStatus({ kind: "info", text: `Imported ${result.inserted} transactions, skipped ${result.skipped} duplicates.` });
     });
   };
@@ -93,7 +127,7 @@ export default function App() {
     if (!window.confirm(`Undo import of ${imp.filename}? Its ${imp.row_count} transactions will be removed.`)) return;
     run(async () => {
       await api.undoImport(imp.id);
-      await loadMonth(month);
+      await loadData();
     });
   };
 
@@ -102,18 +136,31 @@ export default function App() {
     run(async () => {
       await api.createRule(rule.match_text.trim(), rule.category.trim());
       setRule({ match_text: "", category: "" });
-      await loadMonth(month);
+      await loadData();
       setStatus({ kind: "info", text: "Rule saved and applied to matching transactions." });
     });
   };
 
+  // Everything below the filters is derived from the loaded transactions.
+  const visible = useMemo(() => filterByCategories(transactions, selectedCategories), [transactions, selectedCategories]);
+  const stats = useMemo(() => categoryStats(transactions, allCategories), [transactions, allCategories]);
+  const colorOf = useMemo(() => categoryColors([...allCategories, UNCATEGORIZED]), [allCategories]);
+  const byCategory = useMemo(() => spendBy(visible, categoryOf), [visible]);
+  const merchants = useMemo(() => spendBy(visible, (t) => t.merchant).slice(0, 10), [visible]);
+  const trend = useMemo(() => monthlyByCategory(visible), [visible]);
+  const pace = useMemo(
+    () => spendingPace(filterByCategories(paceTransactions, selectedCategories), paceEnd),
+    [paceTransactions, selectedCategories, paceEnd],
+  );
+  const hasPace = pace.data.some((d) => (d.current ?? 0) > 0 || (d.previous ?? 0) > 0);
   const newRows = preview?.rows.filter((r) => !r.duplicate).length ?? 0;
-  const chartData = summary.map((c) => ({ category: c.category, total: Number(c.total) }));
-  const totalSpent = summary.reduce((sum, c) => sum + Number(c.total), 0);
 
   return (
     <main>
-      <h1>Personal Finance</h1>
+      <div className="row spread">
+        <h1>Personal Finance</h1>
+        {!isProd && <span className="env-badge">Development · fake data only</span>}
+      </div>
       {status && (
         <p className={`status ${status.kind}`} role={status.kind === "error" ? "alert" : "status"}>
           {status.text}
@@ -121,11 +168,68 @@ export default function App() {
       )}
 
       <section>
+        <h2>Filters</h2>
+        <FilterBar
+          accounts={accounts}
+          accountIds={accountIds}
+          onAccountsChange={setAccountIds}
+          preset={preset}
+          onPresetChange={choosePreset}
+          custom={custom}
+          onCustomChange={setCustom}
+        />
+        {rangeError && (
+          <p className="status error" role="alert">
+            {rangeError}
+          </p>
+        )}
+        <h3>Categories</h3>
+        <CategoryFilter stats={stats} selected={selectedCategories} onChange={setSelectedCategories} colorOf={colorOf} />
+      </section>
+
+      <section>
+        <div className="stats">
+          <div>
+            <span className="muted">Total spent</span>
+            <strong>{formatCents(totalSpent(visible))}</strong>
+          </div>
+          <div>
+            <span className="muted">Transactions</span>
+            <strong>{visible.length}</strong>
+          </div>
+          <div>
+            <span className="muted">Range</span>
+            <strong>{range.start || range.end ? `${range.start ?? "start"} → ${range.end ?? "today"}` : "All time"}</strong>
+          </div>
+        </div>
+      </section>
+
+      <div className="charts">
+        <ChartCard title="Spending by category" empty={byCategory.length === 0}>
+          <CategoryChart totals={byCategory} colorOf={colorOf} />
+        </ChartCard>
+        <ChartCard title="Top merchants" empty={merchants.length === 0}>
+          <MerchantChart totals={merchants} />
+        </ChartCard>
+        <ChartCard title="Spending over time" empty={trend.data.length === 0}>
+          <TrendChart series={trend.series} data={trend.data} colorOf={colorOf} />
+        </ChartCard>
+        <ChartCard title={`Spending pace: ${pace.currentLabel} vs. ${pace.previousLabel}`} empty={!hasPace}>
+          <PaceChart {...pace} />
+        </ChartCard>
+      </div>
+
+      <section>
+        <h2>Transactions</h2>
+        {visible.length === 0 ? <p className="muted">No transactions match these filters.</p> : <TransactionTable rows={visible} showAccount />}
+      </section>
+
+      <section>
         <h2>Import a statement</h2>
         <div className="row">
           <label>
             Account{" "}
-            <select value={accountId ?? ""} onChange={(e) => setAccountId(Number(e.target.value))}>
+            <select value={importAccountId ?? ""} onChange={(e) => setImportAccountId(Number(e.target.value))}>
               {accounts.length === 0 && <option value="">No accounts yet</option>}
               {accounts.map((a) => (
                 <option key={a.id} value={a.id}>
@@ -155,7 +259,7 @@ export default function App() {
               }}
             />
           </label>
-          <button disabled={!file || accountId === null}>Preview</button>
+          <button disabled={!file || importAccountId === null}>Preview</button>
         </form>
 
         {preview && (
@@ -181,38 +285,6 @@ export default function App() {
       </section>
 
       <section>
-        <div className="row spread">
-          <h2>Spending</h2>
-          <label>
-            Month <input type="month" value={month} onChange={(e) => e.target.value && setMonth(e.target.value)} />
-          </label>
-        </div>
-        {summary.length === 0 ? (
-          <p className="muted">No spending this month.</p>
-        ) : (
-          <>
-            <p>
-              Total spent: <strong>{money(String(totalSpent))}</strong>
-            </p>
-            <ResponsiveContainer width="100%" height={Math.max(160, chartData.length * 36)}>
-              <BarChart data={chartData} layout="vertical" margin={{ left: 16, right: 16 }}>
-                <XAxis type="number" tickFormatter={(v) => `$${v}`} />
-                <YAxis type="category" dataKey="category" width={130} />
-                <Tooltip formatter={(v) => money(String(v))} />
-                <Bar dataKey="total" fill="#3b82f6" />
-              </BarChart>
-            </ResponsiveContainer>
-          </>
-        )}
-        <h3>Transactions</h3>
-        {transactions.length === 0 ? (
-          <p className="muted">No transactions this month.</p>
-        ) : (
-          <TransactionTable rows={transactions} />
-        )}
-      </section>
-
-      <section>
         <h2>Category rules</h2>
         <p className="muted">Transactions whose description contains the text get this category, overriding Chase's.</p>
         <form onSubmit={addRule} className="row">
@@ -222,7 +294,17 @@ export default function App() {
           </label>
           <label>
             Category{" "}
-            <input value={rule.category} onChange={(e) => setRule({ ...rule, category: e.target.value })} placeholder="Groceries" />
+            <input
+              value={rule.category}
+              onChange={(e) => setRule({ ...rule, category: e.target.value })}
+              placeholder="Groceries"
+              list="category-names"
+            />
+            <datalist id="category-names">
+              {allCategories.map((c) => (
+                <option key={c} value={c} />
+              ))}
+            </datalist>
           </label>
           <button disabled={!rule.match_text.trim() || !rule.category.trim()}>Add rule</button>
         </form>
@@ -251,9 +333,18 @@ export default function App() {
   );
 }
 
-type Row = Pick<Transaction, "id" | "date" | "merchant" | "amount" | "category" | "is_transfer">;
+function ChartCard({ title, empty, children }: { title: string; empty: boolean; children: ReactNode }) {
+  return (
+    <section className="chart-card">
+      <h2>{title}</h2>
+      {empty ? <p className="muted">No spending for these filters.</p> : children}
+    </section>
+  );
+}
 
-function TransactionTable({ rows, flag }: { rows: Row[]; flag?: (index: number) => string }) {
+type Row = Pick<Transaction, "id" | "date" | "merchant" | "amount" | "category" | "is_transfer" | "account">;
+
+function TransactionTable({ rows, flag, showAccount }: { rows: Row[]; flag?: (index: number) => string; showAccount?: boolean }) {
   return (
     <div className="table-wrap">
       <table>
@@ -261,6 +352,7 @@ function TransactionTable({ rows, flag }: { rows: Row[]; flag?: (index: number) 
           <tr>
             <th>Date</th>
             <th>Description</th>
+            {showAccount && <th>Account</th>}
             <th>Category</th>
             <th className="num">Amount</th>
             {flag && <th>Status</th>}
@@ -271,7 +363,8 @@ function TransactionTable({ rows, flag }: { rows: Row[]; flag?: (index: number) 
             <tr key={r.id}>
               <td>{r.date}</td>
               <td>{r.merchant}</td>
-              <td>{r.is_transfer ? <span className="muted">Transfer</span> : (r.category ?? "Uncategorized")}</td>
+              {showAccount && <td>{r.account}</td>}
+              <td>{r.is_transfer ? <span className="muted">Transfer</span> : (r.category ?? UNCATEGORIZED)}</td>
               <td className={`num ${Number(r.amount) > 0 ? "credit" : ""}`}>{money(r.amount)}</td>
               {flag && <td>{flag(i)}</td>}
             </tr>

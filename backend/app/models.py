@@ -1,7 +1,7 @@
 import datetime as dt
 from decimal import Decimal
 
-from sqlalchemy import ForeignKey, Numeric, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -40,7 +40,7 @@ class Import(Base):
     filename: Mapped[str]
     file_sha256: Mapped[str] = mapped_column(String(64))
     row_count: Mapped[int]
-    imported_at: Mapped[dt.datetime] = mapped_column(server_default=func.now())
+    imported_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class Transaction(Base):

@@ -15,6 +15,25 @@ Open http://localhost:5173. The API docs are at http://localhost:8000/docs.
 
 Stop with `docker compose down`; your data stays in the `pgdata` volume. `docker compose down -v` deletes it permanently.
 
+## Development vs. prod
+
+There are two separate copies of the app, each with its own database:
+
+| | Development | Prod |
+|---|---|---|
+| Start | `docker compose up` | `./prod up -d` |
+| Stop | `docker compose down` | `./prod down` |
+| Compose project | `finance-dev` | `finance-prod` |
+| Password file | `.env` | `.env.prod` (created on first run) |
+| Data | fake only (`dev-data/`) | your real statements |
+| Page | orange "Development · fake data only" badge, tab title starts with DEV | no badge |
+
+Both use the same ports, so only one can run at a time. Stop one before starting the other. Run only the development copy while working with an AI assistant.
+
+Load fake data into the dev copy: add an account, then import `dev-data/fake_chase_card.csv` (about 200 transactions from June to November 2026). To regenerate it: `python3 backend/scripts/make_fake_data.py`.
+
+Back up prod data: `./prod exec db pg_dump -U finance finance > ~/finance-backup.sql`
+
 ## Use it
 
 1. Add an account (e.g. "Chase Sapphire").

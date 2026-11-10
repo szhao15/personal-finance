@@ -39,7 +39,7 @@ def upgrade() -> None:
         sa.Column("filename", sa.String, nullable=False),
         sa.Column("file_sha256", sa.String(64), nullable=False),
         sa.Column("row_count", sa.Integer, nullable=False),
-        sa.Column("imported_at", sa.DateTime, server_default=sa.func.now(), nullable=False),
+        sa.Column("imported_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
     )
     op.create_table(
         "transactions",

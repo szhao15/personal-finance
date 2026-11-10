@@ -158,6 +158,7 @@ Hosting on AWS is a learning goal, but it pulls against "local-first privacy". S
 - **Users:** built for one user (me), running locally, with no login screen for now. Making it public later is a goal, because it's a security learning opportunity and others could use it, and is planned as a future phase.
 - **Database:** PostgreSQL. Data is stored on disk in a Docker volume, so it survives restarts. Backups use `pg_dump`. Encryption at rest comes from FileVault locally, and KMS on AWS later.
 - **Running the app:** Docker Compose with three services (`db`, `backend`, `frontend`), started with `docker compose up`. All ports are bound to `127.0.0.1` so only this machine can reach them. The secret DB password lives in an ignored `.env` file.
+- **Dev vs. prod:** two Compose projects with separate databases. `finance-dev` (default) holds only generated fake data; `finance-prod` (started with `./prod`) holds real statements and is never run while developing with an AI assistant.
 - **Imports:** the backend parses uploaded files in memory and shows a preview before saving. It saves only the transactions, plus an `imports` record with the file's SHA-256 hash to catch re-uploads. The raw file is discarded.
 - **Bank data:** file import only, with no aggregators (see Guiding Principles).
 - **First import:** a Chase credit card CSV. Other banks and PDF come after the first milestone works.

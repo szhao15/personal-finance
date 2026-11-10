@@ -41,6 +41,16 @@ def test_header_without_title_line():
     assert len(rows) == 6
 
 
+def test_dev_data_parses():
+    dev_file = Path(__file__).parents[2] / "dev-data" / "fake_chase_card.csv"
+    if not dev_file.exists():
+        pytest.skip("dev-data is not mounted (e.g. inside the backend container)")
+    last4, rows = chase.parse(dev_file.read_text())
+    assert last4 == "0000"
+    assert len(rows) > 100
+    assert len({r.dedup_key for r in rows}) == len(rows)
+
+
 def test_rejects_non_chase_file():
     with pytest.raises(chase.ParseError, match="header row not found"):
         chase.parse("Date,Amount\n10/01/2026,5.00\n")

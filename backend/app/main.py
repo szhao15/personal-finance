@@ -1,7 +1,7 @@
 import datetime as dt
 import hashlib
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -52,15 +52,6 @@ def pick_category(rules: list[tuple[str, str]], row: chase.Row) -> str | None:
     """First matching rule wins; otherwise keep Chase's own category."""
     merchant = row.merchant.upper()
     return next((name for text, name in rules if text in merchant), row.chase_category)
-
-
-def month_range(month: str) -> tuple[dt.date, dt.date]:
-    try:
-        start = dt.date.fromisoformat(f"{month}-01")
-    except ValueError:
-        raise HTTPException(400, "month must be YYYY-MM") from None
-    end = dt.date(start.year + start.month // 12, start.month % 12 + 1, 1)
-    return start, end
 
 
 async def read_statement(file: UploadFile) -> tuple[str, str | None, list[chase.Row]]:
@@ -202,15 +193,28 @@ def undo_import(import_id: int, db: Session = Depends(get_session)):
 
 
 @app.get("/transactions")
-def list_transactions(month: str, db: Session = Depends(get_session)):
-    start, end = month_range(month)
+def list_transactions(
+    start: dt.date | None = None,
+    end: dt.date | None = None,
+    account_id: list[int] = Query(default=[]),
+    db: Session = Depends(get_session),
+):
+    """Transactions between start and end (both inclusive, both optional).
+    No account_id means all accounts; repeat it to pick several."""
+    if start and end and start > end:
+        raise HTTPException(400, "start must be on or before end")
     query = (
         select(Transaction, Category.name, Account.name)
         .join(Account)
         .outerjoin(Category, Transaction.category_id == Category.id)
-        .where(Transaction.date >= start, Transaction.date < end)
         .order_by(Transaction.date.desc(), Transaction.id.desc())
     )
+    if start:
+        query = query.where(Transaction.date >= start)
+    if end:
+        query = query.where(Transaction.date <= end)
+    if account_id:
+        query = query.where(Transaction.account_id.in_(account_id))
     return [
         {
             "id": t.id,
@@ -225,21 +229,9 @@ def list_transactions(month: str, db: Session = Depends(get_session)):
     ]
 
 
-@app.get("/summary")
-def spending_summary(month: str, db: Session = Depends(get_session)):
-    """Spending per category for the month. Transfers are excluded; refunds reduce spending."""
-    start, end = month_range(month)
-    name = func.coalesce(Category.name, "Uncategorized")
-    total = -func.sum(Transaction.amount)
-    query = (
-        select(name, total)
-        .select_from(Transaction)
-        .outerjoin(Category, Transaction.category_id == Category.id)
-        .where(Transaction.date >= start, Transaction.date < end, Transaction.is_transfer.is_(False))
-        .group_by(name)
-        .order_by(total.desc())
-    )
-    return [{"category": category, "total": str(amount)} for category, amount in db.execute(query)]
+@app.get("/categories")
+def list_categories(db: Session = Depends(get_session)):
+    return list(db.scalars(select(Category.name).order_by(Category.name)))
 
 
 @app.get("/rules")

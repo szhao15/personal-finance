@@ -20,7 +20,15 @@ export type Transaction = {
   is_transfer: boolean;
   account: string;
 };
-export type CategoryTotal = { category: string; total: string };
+export type TransactionFilter = { start: string | null; end: string | null; accountIds: number[] };
+
+function transactionQuery({ start, end, accountIds }: TransactionFilter) {
+  const query = new URLSearchParams();
+  if (start) query.set("start", start);
+  if (end) query.set("end", end);
+  accountIds.forEach((id) => query.append("account_id", String(id)));
+  return query.toString();
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`/api${path}`, init);
@@ -52,8 +60,8 @@ export const api = {
   commit: (accountId: number, file: File) => upload<CommitResult>("/imports", accountId, file),
   imports: () => request<ImportRecord[]>("/imports"),
   undoImport: (id: number) => request<{ ok: boolean }>(`/imports/${id}`, { method: "DELETE" }),
-  transactions: (month: string) => request<Transaction[]>(`/transactions?month=${month}`),
-  summary: (month: string) => request<CategoryTotal[]>(`/summary?month=${month}`),
+  transactions: (filter: TransactionFilter) => request<Transaction[]>(`/transactions?${transactionQuery(filter)}`),
+  categories: () => request<string[]>("/categories"),
   createRule: (match_text: string, category: string) => request("/rules", post({ match_text, category })),
 };
 
