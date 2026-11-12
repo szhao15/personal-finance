@@ -1,0 +1,12 @@
+import os
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+engine = create_engine(os.environ["DATABASE_URL"])
+SessionLocal = sessionmaker(engine)
+
+
+def get_session():
+    with SessionLocal() as session:
+        yield session

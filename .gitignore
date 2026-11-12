@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+.venv/
+*.db
+*.db-*
+server/data/
+.DS_Store
+# Real statements must never be committed; test fixtures live in backend/tests/fixtures/
+/*.csv
+/*.numbers
+/*.xlsx
+/dev-data
+prod
+.claude/settings.json

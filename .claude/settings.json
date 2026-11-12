@@ -1,0 +1,22 @@
+{
+  "enabledPlugins": {
+    "ponytail@ponytail": true
+  },
+  "permissions": {
+    "deny": [
+      "Read(**/.env.prod)",
+      "Bash(psql:*)",
+      "Bash(pg_dump:*)",
+      "Bash(pg_dumpall:*)",
+      "Bash(docker compose exec:*)",
+      "Bash(docker compose run:*)",
+      "Bash(docker compose cp:*)",
+      "Bash(docker exec:*)",
+      "Bash(docker run:*)",
+      "Bash(docker cp:*)",
+      "Bash(curl *:8000*)",
+      "Bash(curl *:5173*)",
+      "Bash(cat *.env*)"
+    ]
+  }
+}
