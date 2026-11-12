@@ -37,6 +37,7 @@ services:
     environment:
       API_URL: http://backend:8000
       VITE_APP_ENV: ${APP_ENV:-dev}
+      WATCH_POLLING: "true"
     depends_on: [backend]
     ports:
       - "127.0.0.1:5173:5173"

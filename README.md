@@ -30,25 +30,29 @@ There are two separate copies of the app, each with its own database:
 
 Both use the same ports, so only one can run at a time. Stop one before starting the other. Run only the development copy while working with an AI assistant.
 
-Load fake data into the dev copy: add an account, then import `dev-data/fake_chase_card.csv` (about 200 transactions from June to November 2026). To regenerate it: `python3 backend/scripts/make_fake_data.py`.
+Load fake data into the dev copy: add one account per file and import `dev-data/fake_chase_card.csv`, `fake_citi_card.csv` and `fake_bilt_card.csv` (June to November 2026). Import Chase first so Citi and Bilt can learn categories from its history. To regenerate them: `python3 backend/scripts/make_fake_data.py`.
 
 Back up prod data: `./prod exec db pg_dump -U finance finance > ~/finance-backup.sql`
 
 ## Use it
 
 1. Add an account (e.g. "Chase Sapphire").
-2. In Chase, download your card activity as CSV and choose it under **Import a statement**.
+2. Download your card activity as CSV from Chase, Citi or Bilt and choose it under **Import a statement**. The bank is detected from the file. Upload the CSV itself, not a copy opened and saved in Numbers or Excel.
 3. Check the preview, then confirm. Only new transactions are saved; the file itself is not kept.
-4. Pick a month to see spending by category. Card payments count as transfers, not spending.
+4. Use the filters (accounts, time range, categories) to explore spending. Card payments count as transfers, not spending.
+5. Fix any wrong or missing category in the transactions table; future imports from that merchant will follow your choice.
 
 ## Tests
 
 ```bash
 docker compose exec backend pytest
 ```
+```bash
+cd frontend && npm test
+```
 
 ## Layout
 
-- `backend/`: Python, FastAPI, SQLAlchemy, Alembic migrations, Chase CSV parser (`app/chase.py`)
+- `backend/`: Python, FastAPI, SQLAlchemy, Alembic migrations, statement parsers (`app/chase.py`, `citi.py`, `bilt.py`) and category matching (`app/categorize.py`)
 - `frontend/`: React, TypeScript, Vite, Recharts
 - `docker-compose.yml`: Postgres, backend and frontend, reachable only from this machine

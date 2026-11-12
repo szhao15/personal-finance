@@ -1,73 +1,33 @@
-"""Parser for Chase credit card CSV exports."""
+"""Chase credit card CSV.
+Amounts are already negative for purchases. Chase's own category is specific, so it is used as is.
+"""
 
 import csv
-import datetime as dt
-import hashlib
 import re
-from collections import Counter
-from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 
-REQUIRED_COLUMNS = ["Transaction Date", "Description", "Category", "Type", "Amount"]
-CENT = Decimal("0.01")
+from .statements import Row, clean, merchant_key, parse_amount, parse_date, records, require_columns
 
 
-class ParseError(ValueError):
-    pass
+def matches(header: list[str]) -> bool:
+    return header[:2] == ["Transaction Date", "Post Date"]
 
 
-@dataclass
-class Row:
-    date: dt.date
-    description_raw: str
-    merchant: str
-    amount: Decimal
-    chase_category: str | None
-    is_transfer: bool
-    dedup_key: str
-
-
-def parse(text: str) -> tuple[str | None, list[Row]]:
-    """Return (card last 4 digits if the file names them, parsed rows)."""
-    lines = text.splitlines()
-    start = next((i for i, line in enumerate(lines) if line.startswith("Transaction Date,")), None)
-    if start is None:
-        raise ParseError("Not a Chase credit card CSV: header row not found")
-
-    # Some exports start with a title line like "Chase9602_Activity20241104_...".
-    match = re.search(r"Chase(\d{4})_", "\n".join(lines[:start]))
-    last4 = match.group(1) if match else None
-
-    reader = csv.DictReader(lines[start:])
-    missing = [c for c in REQUIRED_COLUMNS if c not in (reader.fieldnames or [])]
-    if missing:
-        raise ParseError(f"Missing columns: {', '.join(missing)}")
-
-    rows: list[Row] = []
-    seen: Counter[str] = Counter()
-    for line_no, rec in enumerate(reader, start=start + 2):
-        try:
-            date = dt.datetime.strptime(rec["Transaction Date"], "%m/%d/%Y").date()
-            amount = Decimal(rec["Amount"]).quantize(CENT)
-        except (ValueError, TypeError, InvalidOperation):
-            raise ParseError(f"Line {line_no}: invalid date or amount") from None
-        if not amount.is_finite():
-            raise ParseError(f"Line {line_no}: invalid amount")
-
-        merchant = " ".join(rec["Description"].split())
-        # Count identical rows so two real identical charges on one day both survive,
-        # while re-importing the same statement produces the same keys and is skipped.
-        base = f"{date.isoformat()}|{amount}|{merchant.upper()}"
-        seen[base] += 1
+def parse(preamble: str, reader: csv.DictReader, first_line_no: int) -> tuple[str | None, list[Row]]:
+    require_columns(reader, ["Transaction Date", "Description", "Category", "Type", "Amount"])
+    match = re.search(r"Chase(\d{4})_", preamble)
+    rows = []
+    for line_no, rec in records(reader, first_line_no):
+        amount = parse_amount(rec["Amount"], line_no, required=True)
+        merchant = clean(rec["Description"])
         rows.append(
             Row(
-                date=date,
+                date=parse_date(rec["Transaction Date"], "%m/%d/%Y", line_no),
                 description_raw=rec["Description"],
                 merchant=merchant,
+                merchant_key=merchant_key(merchant),
                 amount=amount,
-                chase_category=rec["Category"] or None,
-                is_transfer=rec["Type"] == "Payment",
-                dedup_key=hashlib.sha256(f"{base}|{seen[base]}".encode()).hexdigest(),
+                bank_category=clean(rec["Category"]) or None,
+                is_transfer=clean(rec["Type"]) == "Payment",
             )
         )
-    return last4, rows
+    return (match.group(1) if match else None), rows

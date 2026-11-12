@@ -52,6 +52,7 @@ class Transaction(Base):
     date: Mapped[dt.date]
     description_raw: Mapped[str]
     merchant: Mapped[str]
+    merchant_key: Mapped[str] = mapped_column(index=True)  # cleaned merchant name, for learning categories
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))  # negative = money out
     category_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id", ondelete="SET NULL"))
     is_transfer: Mapped[bool]

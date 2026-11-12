@@ -123,6 +123,12 @@ export default function App() {
     });
   };
 
+  const changeCategory = (t: Pick<Transaction, "id">, category: string | null) =>
+    run(async () => {
+      await api.setCategory(t.id, category);
+      await loadData();
+    });
+
   const undoImport = (imp: ImportRecord) => {
     if (!window.confirm(`Undo import of ${imp.filename}? Its ${imp.row_count} transactions will be removed.`)) return;
     run(async () => {
@@ -221,7 +227,14 @@ export default function App() {
 
       <section>
         <h2>Transactions</h2>
-        {visible.length === 0 ? <p className="muted">No transactions match these filters.</p> : <TransactionTable rows={visible} showAccount />}
+        <p className="muted">
+          Change a category to fix it. Future imports from the same merchant will use your choice. Tip: filter by Uncategorized to review what still needs one.
+        </p>
+        {visible.length === 0 ? (
+          <p className="muted">No transactions match these filters.</p>
+        ) : (
+          <TransactionTable rows={visible} showAccount categories={allCategories} onCategoryChange={changeCategory} />
+        )}
       </section>
 
       <section>
@@ -241,14 +254,14 @@ export default function App() {
           </label>
           <form onSubmit={addAccount} className="row">
             <label>
-              New account <input value={newAccount} onChange={(e) => setNewAccount(e.target.value)} placeholder="Chase Sapphire" />
+              New account <input value={newAccount} onChange={(e) => setNewAccount(e.target.value)} />
             </label>
             <button disabled={!newAccount.trim()}>Add</button>
           </form>
         </div>
         <form onSubmit={showPreview} className="row">
           <label>
-            Chase CSV{" "}
+            Statement CSV (Chase, Citi or Bilt){" "}
             <input
               ref={fileInput}
               type="file"
@@ -264,9 +277,10 @@ export default function App() {
 
         {preview && (
           <div className="preview">
+            {preview.warning && <p className="status error">{preview.warning}</p>}
             {preview.already_imported && <p className="status error">This exact file was already imported.</p>}
             <p>
-              {preview.rows.length} rows found, {newRows} new.
+              {preview.bank} statement{preview.last4 ? ` (card ••${preview.last4})` : ""}: {preview.rows.length} rows found, {newRows} new.
             </p>
             <TransactionTable
               rows={preview.rows.map((r, i) => ({ ...r, id: i, account: "" }))}
@@ -290,14 +304,13 @@ export default function App() {
         <form onSubmit={addRule} className="row">
           <label>
             Description contains{" "}
-            <input value={rule.match_text} onChange={(e) => setRule({ ...rule, match_text: e.target.value })} placeholder="TRADER JOE" />
+            <input value={rule.match_text} onChange={(e) => setRule({ ...rule, match_text: e.target.value })} />
           </label>
           <label>
             Category{" "}
             <input
               value={rule.category}
               onChange={(e) => setRule({ ...rule, category: e.target.value })}
-              placeholder="Groceries"
               list="category-names"
             />
             <datalist id="category-names">
@@ -344,7 +357,45 @@ function ChartCard({ title, empty, children }: { title: string; empty: boolean; 
 
 type Row = Pick<Transaction, "id" | "date" | "merchant" | "amount" | "category" | "is_transfer" | "account">;
 
-function TransactionTable({ rows, flag, showAccount }: { rows: Row[]; flag?: (index: number) => string; showAccount?: boolean }) {
+const NEW_CATEGORY = "__new__";
+
+function CategorySelect({ row, categories, onChange }: { row: Row; categories: string[]; onChange: (row: Row, category: string | null) => void }) {
+  const choose = (value: string) => {
+    if (value !== NEW_CATEGORY) return onChange(row, value || null);
+    const name = window.prompt("New category name")?.trim();
+    if (name) onChange(row, name);
+  };
+  return (
+    <select aria-label={`Category for ${row.merchant} on ${row.date}`} value={row.category ?? ""} onChange={(e) => choose(e.target.value)}>
+      <option value="">{UNCATEGORIZED}</option>
+      {categories.map((c) => (
+        <option key={c} value={c}>
+          {c}
+        </option>
+      ))}
+      <option value={NEW_CATEGORY}>New category…</option>
+    </select>
+  );
+}
+
+function TransactionTable({
+  rows,
+  flag,
+  showAccount,
+  categories = [],
+  onCategoryChange,
+}: {
+  rows: Row[];
+  flag?: (index: number) => string;
+  showAccount?: boolean;
+  categories?: string[];
+  onCategoryChange?: (row: Row, category: string | null) => void;
+}) {
+  const categoryCell = (r: Row) => {
+    if (r.is_transfer) return <span className="muted">Transfer</span>;
+    if (onCategoryChange) return <CategorySelect row={r} categories={categories} onChange={onCategoryChange} />;
+    return r.category ?? UNCATEGORIZED;
+  };
   return (
     <div className="table-wrap">
       <table>
@@ -364,7 +415,7 @@ function TransactionTable({ rows, flag, showAccount }: { rows: Row[]; flag?: (in
               <td>{r.date}</td>
               <td>{r.merchant}</td>
               {showAccount && <td>{r.account}</td>}
-              <td>{r.is_transfer ? <span className="muted">Transfer</span> : (r.category ?? UNCATEGORIZED)}</td>
+              <td>{categoryCell(r)}</td>
               <td className={`num ${Number(r.amount) > 0 ? "credit" : ""}`}>{money(r.amount)}</td>
               {flag && <td>{flag(i)}</td>}
             </tr>

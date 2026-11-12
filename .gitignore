@@ -12,6 +12,8 @@ server/data/
 .DS_Store
 # Real statements must never be committed; test fixtures live in backend/tests/fixtures/
 /*.csv
+/*.numbers
+/*.xlsx
 /dev-data
 prod
 .claude/settings.json

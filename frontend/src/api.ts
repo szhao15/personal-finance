@@ -8,7 +8,13 @@ export type PreviewRow = {
   is_transfer: boolean;
   duplicate: boolean;
 };
-export type Preview = { already_imported: boolean; last4: string | null; rows: PreviewRow[] };
+export type Preview = {
+  bank: string;
+  warning: string | null;
+  already_imported: boolean;
+  last4: string | null;
+  rows: PreviewRow[];
+};
 export type CommitResult = { import_id: number | null; inserted: number; skipped: number };
 export type ImportRecord = { id: number; account: string; filename: string; row_count: number; imported_at: string };
 export type Transaction = {
@@ -62,6 +68,12 @@ export const api = {
   undoImport: (id: number) => request<{ ok: boolean }>(`/imports/${id}`, { method: "DELETE" }),
   transactions: (filter: TransactionFilter) => request<Transaction[]>(`/transactions?${transactionQuery(filter)}`),
   categories: () => request<string[]>("/categories"),
+  setCategory: (transactionId: number, category: string | null) =>
+    request<{ id: number; category: string | null }>(`/transactions/${transactionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ category }),
+    }),
   createRule: (match_text: string, category: string) => request("/rules", post({ match_text, category })),
 };
 
