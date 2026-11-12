@@ -5,7 +5,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFi
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from . import statements
 from .categorize import categorize_rows
@@ -30,6 +30,16 @@ class RuleIn(BaseModel):
 
 class CategoryIn(BaseModel):
     category: str | None = Field(default=None, max_length=100)  # None = Uncategorized
+    apply_to_merchant: bool = False  # also change every other transaction from this merchant
+
+
+class NewCategory(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    parent: str | None = None  # parent category name, for a subcategory
+
+
+class RenameCategory(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
 
 
 def get_account(db: Session, account_id: int) -> Account:
@@ -246,6 +256,7 @@ def list_transactions(
             "id": t.id,
             "date": t.date.isoformat(),
             "merchant": t.merchant,
+            "merchant_key": t.merchant_key,
             "amount": str(t.amount),
             "category": category,
             "is_transfer": t.is_transfer,
@@ -257,25 +268,103 @@ def list_transactions(
 
 @app.patch("/transactions/{transaction_id}")
 def set_transaction_category(transaction_id: int, body: CategoryIn, db: Session = Depends(get_session)):
-    """Change one transaction's category. Future imports of the same merchant learn from it (history)."""
+    """Change a transaction's category, and optionally every other transaction from the same merchant.
+    Future imports of that merchant learn from it (history)."""
     t = db.get(Transaction, transaction_id)
     if t is None:
         raise HTTPException(404, "Transaction not found")
     name = (body.category or "").strip()
-    t.category_id = get_or_create_category(db, name).id if name else None
+    category_id = get_or_create_category(db, name).id if name else None
+    target = Transaction.id == t.id
+    if body.apply_to_merchant:
+        target = (Transaction.merchant_key == t.merchant_key) & Transaction.is_transfer.is_(False)
+    updated = db.execute(update(Transaction).where(target).values(category_id=category_id)).rowcount
     db.commit()
-    return {"id": t.id, "category": name or None}
+    return {"category": name or None, "updated": updated}
+
+
+def category_or_404(db: Session, category_id: int) -> Category:
+    category = db.get(Category, category_id)
+    if category is None:
+        raise HTTPException(404, "Category not found")
+    return category
+
+
+def ensure_name_free(db: Session, name: str, except_id: int | None = None) -> None:
+    existing = db.scalar(select(Category).where(func.lower(Category.name) == name.lower()))
+    if existing and existing.id != except_id:
+        raise HTTPException(409, f'A category named "{existing.name}" already exists')
 
 
 @app.get("/categories")
 def list_categories(db: Session = Depends(get_session)):
-    return list(db.scalars(select(Category.name).order_by(Category.name)))
+    """All categories with their parent's name (null for top-level), parents first."""
+    parent = aliased(Category)
+    query = (
+        select(Category.id, Category.name, parent.name)
+        .outerjoin(parent, Category.parent_id == parent.id)
+        .order_by(func.coalesce(parent.name, Category.name), Category.parent_id.is_not(None), Category.name)
+    )
+    return [{"id": i, "name": name, "parent": parent_name} for i, name, parent_name in db.execute(query)]
+
+
+@app.post("/categories", status_code=201)
+def create_category(body: NewCategory, db: Session = Depends(get_session)):
+    name = body.name.strip()
+    ensure_name_free(db, name)
+    parent_id = None
+    if body.parent:
+        parent = db.scalar(select(Category).where(Category.name == body.parent))
+        if parent is None:
+            raise HTTPException(404, f'Parent category "{body.parent}" not found')
+        if parent.parent_id is not None:
+            raise HTTPException(400, "Subcategories can't have their own subcategories")
+        parent_id = parent.id
+    category = Category(name=name, parent_id=parent_id)
+    db.add(category)
+    db.commit()
+    return {"id": category.id, "name": category.name, "parent": body.parent or None}
+
+
+@app.patch("/categories/{category_id}")
+def rename_category(category_id: int, body: RenameCategory, db: Session = Depends(get_session)):
+    """Rename a category. Transactions and rules point at it by id, so they follow automatically."""
+    category = category_or_404(db, category_id)
+    name = body.name.strip()
+    ensure_name_free(db, name, except_id=category.id)
+    category.name = name
+    db.commit()
+    return {"id": category.id, "name": category.name}
+
+
+@app.delete("/categories/{category_id}")
+def delete_category(category_id: int, db: Session = Depends(get_session)):
+    """Delete a category. Its transactions move to its parent (or Uncategorized), its rules are
+    removed, and its subcategories become top-level (both handled by the database's foreign keys)."""
+    category = category_or_404(db, category_id)
+    moved = db.execute(
+        update(Transaction).where(Transaction.category_id == category.id).values(category_id=category.parent_id)
+    ).rowcount
+    db.delete(category)
+    db.commit()
+    return {"ok": True, "moved": moved}
 
 
 @app.get("/rules")
 def list_rules(db: Session = Depends(get_session)):
     query = select(Rule.id, Rule.match_text, Category.name).join(Category).order_by(Rule.id)
     return [{"id": i, "match_text": text, "category": name} for i, text, name in db.execute(query)]
+
+
+@app.delete("/rules/{rule_id}")
+def delete_rule(rule_id: int, db: Session = Depends(get_session)):
+    """Stop applying a rule to future imports. Transactions it already categorized keep their category."""
+    rule = db.get(Rule, rule_id)
+    if rule is None:
+        raise HTTPException(404, "Rule not found")
+    db.delete(rule)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/rules", status_code=201)

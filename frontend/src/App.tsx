@@ -5,17 +5,24 @@ import {
   categoryStats,
   filterByCategories,
   formatCents,
+  formatDate,
   isoDate,
   monthlyByCategory,
+  parentMap,
   presetRange,
   prevMonth,
+  sortRows,
   spendBy,
   spendingPace,
+  topCategoryOf,
   totalSpent,
   type Preset,
   type Range,
+  type SortDir,
+  type SortKey,
 } from "./analytics";
-import { api, money, type Account, type ImportRecord, type Preview, type Transaction } from "./api";
+import { api, money, type Account, type Category, type ImportRecord, type Preview, type Rule, type Transaction } from "./api";
+import { CategoryManager } from "./CategoryManager";
 import { CategoryChart, MerchantChart, PaceChart, TrendChart, categoryColors } from "./Charts";
 import { CategoryFilter, FilterBar } from "./Filters";
 
@@ -34,6 +41,7 @@ export default function App() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [imports, setImports] = useState<ImportRecord[]>([]);
   const [rule, setRule] = useState({ match_text: "", category: "" });
+  const [rules, setRules] = useState<Rule[]>([]);
   const [status, setStatus] = useState<Status>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -42,9 +50,10 @@ export default function App() {
   const [preset, setPreset] = useState<Preset>("3-months");
   const [custom, setCustom] = useState<Range>(() => presetRange("3-months"));
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [showSubcategories, setShowSubcategories] = useState(false);
 
   // Data
-  const [allCategories, setAllCategories] = useState<string[]>([]);
+  const [allCategories, setAllCategories] = useState<Category[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [paceTransactions, setPaceTransactions] = useState<Transaction[]>([]);
 
@@ -68,17 +77,19 @@ export default function App() {
   };
 
   const loadData = useCallback(async () => {
-    const [txns, pace, categories, importList] = await Promise.all([
+    const [txns, pace, categories, importList, ruleList] = await Promise.all([
       rangeError ? Promise.resolve([]) : api.transactions({ ...range, accountIds }),
       // The pace chart compares the range's last month with the month before it.
       api.transactions({ start: `${prevMonth(paceEnd.slice(0, 7))}-01`, end: paceEnd, accountIds }),
       api.categories(),
       api.imports(),
+      api.rules(),
     ]);
     setTransactions(txns);
     setPaceTransactions(pace);
     setAllCategories(categories);
     setImports(importList);
+    setRules(ruleList);
   }, [range, rangeError, accountIds, paceEnd]);
 
   useEffect(() => {
@@ -123,10 +134,45 @@ export default function App() {
     });
   };
 
-  const changeCategory = (t: Pick<Transaction, "id">, category: string | null) =>
+  const changeCategory = (t: Row, category: string | null) => {
+    // Offer to apply the change to the merchant's other transactions (all dates and accounts).
+    const others = transactions.filter((o) => o.merchant_key === t.merchant_key && o.id !== t.id && !o.is_transfer).length;
+    const applyToMerchant =
+      others > 0 &&
+      window.confirm(
+        `Also change every other transaction from ${t.merchant} to ${category ?? UNCATEGORIZED}?\n\n` +
+          `OK: all from this merchant (at least ${others} more, across all dates and accounts)\nCancel: only this one`,
+      );
     run(async () => {
-      await api.setCategory(t.id, category);
+      const result = await api.setCategory(t.id, category, applyToMerchant);
       await loadData();
+      if (result.updated > 1) setStatus({ kind: "info", text: `Changed ${result.updated} transactions from ${t.merchant}.` });
+    });
+  };
+
+  const createCategory = (name: string, parent: string | null) =>
+    run(async () => {
+      await api.createCategory(name, parent);
+      await loadData();
+      setStatus({ kind: "info", text: parent ? `Added ${name} inside ${parent}.` : `Added ${name}.` });
+    });
+
+  const renameCategory = (c: Category, name: string) =>
+    run(async () => {
+      await api.renameCategory(c.id, name);
+      setSelectedCategories((sel) => sel.map((s) => (s === c.name ? name : s)));
+      await loadData();
+    });
+
+  const deleteCategory = (c: Category) =>
+    run(async () => {
+      const result = await api.deleteCategory(c.id);
+      setSelectedCategories((sel) => sel.filter((s) => s !== c.name));
+      await loadData();
+      setStatus({
+        kind: "info",
+        text: `Deleted ${c.name}. ${result.moved} transactions moved to ${c.parent ?? UNCATEGORIZED}.`,
+      });
     });
 
   const undoImport = (imp: ImportRecord) => {
@@ -147,16 +193,35 @@ export default function App() {
     });
   };
 
+  const deleteRule = (r: Rule) => {
+    if (!window.confirm(`Delete the rule "${r.match_text}" → ${r.category}?`)) return;
+    run(async () => {
+      await api.deleteRule(r.id);
+      await loadData();
+      setStatus({
+        kind: "info",
+        text: "Rule deleted. Future imports won't use it; transactions it already categorized keep their category.",
+      });
+    });
+  };
+
   // Everything below the filters is derived from the loaded transactions.
-  const visible = useMemo(() => filterByCategories(transactions, selectedCategories), [transactions, selectedCategories]);
+  const categoryNames = useMemo(() => allCategories.map((c) => c.name), [allCategories]);
+  const parents = useMemo(() => parentMap(allCategories), [allCategories]);
+  // Charts group by top-level category (Movies counts as Entertainment) unless subcategories are shown.
+  const chartKey = useMemo(() => (showSubcategories ? categoryOf : topCategoryOf(parents)), [showSubcategories, parents]);
+  const visible = useMemo(
+    () => filterByCategories(transactions, selectedCategories, parents),
+    [transactions, selectedCategories, parents],
+  );
   const stats = useMemo(() => categoryStats(transactions, allCategories), [transactions, allCategories]);
-  const colorOf = useMemo(() => categoryColors([...allCategories, UNCATEGORIZED]), [allCategories]);
-  const byCategory = useMemo(() => spendBy(visible, categoryOf), [visible]);
+  const colorOf = useMemo(() => categoryColors([...categoryNames, UNCATEGORIZED]), [categoryNames]);
+  const byCategory = useMemo(() => spendBy(visible, chartKey), [visible, chartKey]);
   const merchants = useMemo(() => spendBy(visible, (t) => t.merchant).slice(0, 10), [visible]);
-  const trend = useMemo(() => monthlyByCategory(visible), [visible]);
+  const trend = useMemo(() => monthlyByCategory(visible, chartKey), [visible, chartKey]);
   const pace = useMemo(
-    () => spendingPace(filterByCategories(paceTransactions, selectedCategories), paceEnd),
-    [paceTransactions, selectedCategories, paceEnd],
+    () => spendingPace(filterByCategories(paceTransactions, selectedCategories, parents), paceEnd),
+    [paceTransactions, selectedCategories, parents, paceEnd],
   );
   const hasPace = pace.data.some((d) => (d.current ?? 0) > 0 || (d.previous ?? 0) > 0);
   const newRows = preview?.rows.filter((r) => !r.duplicate).length ?? 0;
@@ -189,7 +254,13 @@ export default function App() {
             {rangeError}
           </p>
         )}
-        <h3>Categories</h3>
+        <div className="row spread">
+          <h3>Categories</h3>
+          <label className="check">
+            <input type="checkbox" checked={showSubcategories} onChange={(e) => setShowSubcategories(e.target.checked)} />
+            Show subcategories separately in charts
+          </label>
+        </div>
         <CategoryFilter stats={stats} selected={selectedCategories} onChange={setSelectedCategories} colorOf={colorOf} />
       </section>
 
@@ -205,7 +276,11 @@ export default function App() {
           </div>
           <div>
             <span className="muted">Range</span>
-            <strong>{range.start || range.end ? `${range.start ?? "start"} → ${range.end ?? "today"}` : "All time"}</strong>
+            <strong>
+              {range.start || range.end
+                ? `${range.start ? formatDate(range.start) : "start"} → ${range.end ? formatDate(range.end) : "today"}`
+                : "All time"}
+            </strong>
           </div>
         </div>
       </section>
@@ -226,15 +301,19 @@ export default function App() {
       </div>
 
       <section>
-        <h2>Transactions</h2>
-        <p className="muted">
-          Change a category to fix it. Future imports from the same merchant will use your choice. Tip: filter by Uncategorized to review what still needs one.
-        </p>
-        {visible.length === 0 ? (
-          <p className="muted">No transactions match these filters.</p>
-        ) : (
-          <TransactionTable rows={visible} showAccount categories={allCategories} onCategoryChange={changeCategory} />
-        )}
+        <details className="collapsible" open>
+          <summary>
+            <h2>Transactions ({visible.length})</h2>
+          </summary>
+          <p className="muted">
+            Change a category to fix it. Future imports from the same merchant will use your choice. Tip: filter by Uncategorized to review what still needs one.
+          </p>
+          {visible.length === 0 ? (
+            <p className="muted">No transactions match these filters.</p>
+          ) : (
+            <TransactionTable rows={visible} showAccount categories={allCategories} onCategoryChange={changeCategory} />
+          )}
+        </details>
       </section>
 
       <section>
@@ -284,7 +363,7 @@ export default function App() {
             </p>
             <TransactionTable
               rows={preview.rows.map((r, i) => ({ ...r, id: i, account: "" }))}
-              flag={(i) => (preview.rows[i].duplicate ? "Duplicate" : "New")}
+              flag={(r) => (preview.rows[r.id].duplicate ? "Duplicate" : "New")}
             />
             <div className="row">
               <button onClick={confirmImport} disabled={newRows === 0}>
@@ -299,8 +378,17 @@ export default function App() {
       </section>
 
       <section>
+        <h2>Categories</h2>
+        <p className="muted">
+          Add your own categories, or subcategories to be more specific (e.g. Movies inside Entertainment). A parent's totals
+          include its subcategories.
+        </p>
+        <CategoryManager categories={allCategories} onCreate={createCategory} onRename={renameCategory} onDelete={deleteCategory} />
+      </section>
+
+      <section>
         <h2>Category rules</h2>
-        <p className="muted">Transactions whose description contains the text get this category, overriding Chase's.</p>
+        <p className="muted">Transactions whose description contains the text get this category, overriding the bank's.</p>
         <form onSubmit={addRule} className="row">
           <label>
             Description contains{" "}
@@ -314,13 +402,29 @@ export default function App() {
               list="category-names"
             />
             <datalist id="category-names">
-              {allCategories.map((c) => (
+              {categoryNames.map((c) => (
                 <option key={c} value={c} />
               ))}
             </datalist>
           </label>
           <button disabled={!rule.match_text.trim() || !rule.category.trim()}>Add rule</button>
         </form>
+        {rules.length === 0 ? (
+          <p className="muted">No rules yet.</p>
+        ) : (
+          <ul className="imports">
+            {rules.map((r) => (
+              <li key={r.id}>
+                <span>
+                  Description contains <strong>{r.match_text}</strong> → {r.category}
+                </span>
+                <button className="secondary" onClick={() => deleteRule(r)} aria-label={`Delete rule ${r.match_text}`}>
+                  Delete
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       <section>
@@ -332,7 +436,14 @@ export default function App() {
             {imports.map((imp) => (
               <li key={imp.id}>
                 <span>
-                  {imp.filename} · {imp.account} · {imp.row_count} rows · {new Date(imp.imported_at).toLocaleString()}
+                  {imp.filename} · {imp.account} · {imp.row_count} rows ·{" "}
+                  {new Date(imp.imported_at).toLocaleString("en-US", {
+                    month: "2-digit",
+                    day: "2-digit",
+                    year: "numeric",
+                    hour: "numeric",
+                    minute: "2-digit",
+                  })}
                 </span>
                 <button className="secondary" onClick={() => undoImport(imp)}>
                   Undo
@@ -355,22 +466,24 @@ function ChartCard({ title, empty, children }: { title: string; empty: boolean; 
   );
 }
 
-type Row = Pick<Transaction, "id" | "date" | "merchant" | "amount" | "category" | "is_transfer" | "account">;
+type Row = Pick<Transaction, "id" | "date" | "merchant" | "amount" | "category" | "is_transfer" | "account"> &
+  Partial<Pick<Transaction, "merchant_key">>;
 
 const NEW_CATEGORY = "__new__";
 
-function CategorySelect({ row, categories, onChange }: { row: Row; categories: string[]; onChange: (row: Row, category: string | null) => void }) {
+function CategorySelect({ row, categories, onChange }: { row: Row; categories: Category[]; onChange: (row: Row, category: string | null) => void }) {
   const choose = (value: string) => {
     if (value !== NEW_CATEGORY) return onChange(row, value || null);
     const name = window.prompt("New category name")?.trim();
     if (name) onChange(row, name);
   };
   return (
-    <select aria-label={`Category for ${row.merchant} on ${row.date}`} value={row.category ?? ""} onChange={(e) => choose(e.target.value)}>
+    <select aria-label={`Category for ${row.merchant} on ${formatDate(row.date)}`} value={row.category ?? ""} onChange={(e) => choose(e.target.value)}>
       <option value="">{UNCATEGORIZED}</option>
+      {/* Categories arrive parents-first, so each subcategory sits indented under its parent. */}
       {categories.map((c) => (
-        <option key={c} value={c}>
-          {c}
+        <option key={c.id} value={c.name}>
+          {c.parent ? `   ↳ ${c.name}` : c.name}
         </option>
       ))}
       <option value={NEW_CATEGORY}>New category…</option>
@@ -386,38 +499,59 @@ function TransactionTable({
   onCategoryChange,
 }: {
   rows: Row[];
-  flag?: (index: number) => string;
+  flag?: (row: Row) => string;
   showAccount?: boolean;
-  categories?: string[];
+  categories?: Category[];
   onCategoryChange?: (row: Row, category: string | null) => void;
 }) {
+  const [sort, setSort] = useState<{ key: SortKey; dir: SortDir }>({ key: "date", dir: "desc" });
+  const sorted = useMemo(() => sortRows(rows, sort.key, sort.dir), [rows, sort]);
+
   const categoryCell = (r: Row) => {
     if (r.is_transfer) return <span className="muted">Transfer</span>;
     if (onCategoryChange) return <CategorySelect row={r} categories={categories} onChange={onCategoryChange} />;
     return r.category ?? UNCATEGORIZED;
   };
+
+  // Click a heading to sort by it; click again to reverse. Dates start newest first,
+  // amounts largest spending first, text A to Z.
+  const header = (key: SortKey, label: string, className?: string) => {
+    const active = sort.key === key;
+    const next: SortDir = active ? (sort.dir === "asc" ? "desc" : "asc") : key === "date" ? "desc" : "asc";
+    return (
+      <th className={className} aria-sort={active ? (sort.dir === "asc" ? "ascending" : "descending") : "none"}>
+        <button type="button" className="sort" onClick={() => setSort({ key, dir: next })}>
+          {label}
+          <span aria-hidden className={active ? "sort-arrow active" : "sort-arrow"}>
+            {active ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}
+          </span>
+        </button>
+      </th>
+    );
+  };
+
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
-            <th>Date</th>
-            <th>Description</th>
-            {showAccount && <th>Account</th>}
-            <th>Category</th>
-            <th className="num">Amount</th>
+            {header("date", "Date")}
+            {header("merchant", "Description")}
+            {showAccount && header("account", "Account")}
+            {header("category", "Category")}
+            {header("amount", "Amount", "num")}
             {flag && <th>Status</th>}
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, i) => (
+          {sorted.map((r) => (
             <tr key={r.id}>
-              <td>{r.date}</td>
+              <td>{formatDate(r.date)}</td>
               <td>{r.merchant}</td>
               {showAccount && <td>{r.account}</td>}
               <td>{categoryCell(r)}</td>
               <td className={`num ${Number(r.amount) > 0 ? "credit" : ""}`}>{money(r.amount)}</td>
-              {flag && <td>{flag(i)}</td>}
+              {flag && <td>{flag(r)}</td>}
             </tr>
           ))}
         </tbody>

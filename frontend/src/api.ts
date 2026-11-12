@@ -25,8 +25,12 @@ export type Transaction = {
   category: string | null;
   is_transfer: boolean;
   account: string;
+  merchant_key: string;
 };
-export type TransactionFilter = { start: string | null; end: string | null; accountIds: number[] };
+export type Rule = { id: number; match_text: string; category: string };
+/** parent is null for a top-level category, or the parent's name for a subcategory. */
+export type Category = { id: number; name: string; parent: string | null };
+export type TransactionFilter ={ start: string | null; end: string | null; accountIds: number[] };
 
 function transactionQuery({ start, end, accountIds }: TransactionFilter) {
   const query = new URLSearchParams();
@@ -46,11 +50,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-const post = (body: unknown): RequestInit => ({
-  method: "POST",
+const send = (method: string, body: unknown): RequestInit => ({
+  method,
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
 });
+const post = (body: unknown) => send("POST", body);
 
 function upload<T>(path: string, accountId: number, file: File) {
   const form = new FormData();
@@ -67,14 +72,18 @@ export const api = {
   imports: () => request<ImportRecord[]>("/imports"),
   undoImport: (id: number) => request<{ ok: boolean }>(`/imports/${id}`, { method: "DELETE" }),
   transactions: (filter: TransactionFilter) => request<Transaction[]>(`/transactions?${transactionQuery(filter)}`),
-  categories: () => request<string[]>("/categories"),
-  setCategory: (transactionId: number, category: string | null) =>
-    request<{ id: number; category: string | null }>(`/transactions/${transactionId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ category }),
-    }),
+  categories: () => request<Category[]>("/categories"),
+  createCategory: (name: string, parent: string | null) => request<Category>("/categories", post({ name, parent })),
+  renameCategory: (id: number, name: string) => request<Category>(`/categories/${id}`, send("PATCH", { name })),
+  deleteCategory: (id: number) => request<{ ok: boolean; moved: number }>(`/categories/${id}`, { method: "DELETE" }),
+  setCategory: (transactionId: number, category: string | null, applyToMerchant = false) =>
+    request<{ category: string | null; updated: number }>(
+      `/transactions/${transactionId}`,
+      send("PATCH", { category, apply_to_merchant: applyToMerchant }),
+    ),
   createRule: (match_text: string, category: string) => request("/rules", post({ match_text, category })),
+  rules: () => request<Rule[]>("/rules"),
+  deleteRule: (id: number) => request<{ ok: boolean }>(`/rules/${id}`, { method: "DELETE" }),
 };
 
 export const money = (amount: string) =>

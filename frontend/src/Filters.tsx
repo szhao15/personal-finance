@@ -1,4 +1,4 @@
-import { PRESETS, formatCents, type Preset, type Range } from "./analytics";
+import { PRESETS, formatCents, type CategoryStat, type Preset, type Range } from "./analytics";
 import type { Account } from "./api";
 
 export function FilterBar({
@@ -72,7 +72,7 @@ export function CategoryFilter({
   onChange,
   colorOf,
 }: {
-  stats: { name: string; count: number; cents: number }[];
+  stats: CategoryStat[];
   selected: string[];
   onChange: (selected: string[]) => void;
   colorOf: (name: string) => string;
@@ -93,21 +93,30 @@ export function CategoryFilter({
         )}
       </div>
       <div className="chips">
-        {stats.map((s) => (
-          <button
-            key={s.name}
-            type="button"
-            className={`chip${s.count === 0 ? " empty" : ""}`}
-            aria-pressed={selected.includes(s.name)}
-            onClick={() => toggle(s.name)}
-          >
-            <span className="dot" style={{ background: colorOf(s.name) }} aria-hidden />
-            {s.name}
-            <span className="chip-meta">
-              {formatCents(s.cents)} · {s.count}
+        {/* Each top-level category is grouped with its subcategories; its totals include them. */}
+        {stats
+          .filter((s) => !s.parent)
+          .map((top) => (
+            <span key={top.name} className="chip-group">
+              {[top, ...stats.filter((s) => s.parent === top.name)].map((s) => (
+                <button
+                  key={s.name}
+                  type="button"
+                  className={`chip${s.parent ? " sub" : ""}${s.count === 0 ? " empty" : ""}`}
+                  aria-pressed={selected.includes(s.name)}
+                  onClick={() => toggle(s.name)}
+                >
+                  <span className="dot" style={{ background: colorOf(s.name) }} aria-hidden />
+                  {s.parent && <span aria-hidden>↳ </span>}
+                  {s.name}
+                  {s.parent && <span className="sr-only">, in {s.parent}</span>}
+                  <span className="chip-meta">
+                    {formatCents(s.cents)} · {s.count}
+                  </span>
+                </button>
+              ))}
             </span>
-          </button>
-        ))}
+          ))}
       </div>
     </div>
   );

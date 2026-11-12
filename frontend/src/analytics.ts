@@ -1,6 +1,6 @@
 // Pure helpers for filtering and charting. All money math is done in integer cents,
 // so totals are exact; values are converted to dollars only for chart axes.
-import type { Transaction } from "./api";
+import type { Category, Transaction } from "./api";
 
 export type Preset = "this-month" | "last-month" | "3-months" | "ytd" | "12-months" | "all" | "custom";
 export type Range = { start: string | null; end: string | null };
@@ -20,6 +20,12 @@ export const UNCATEGORIZED = "Uncategorized";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 export const isoDate = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+/** "2026-11-08" -> "11/08/2026". Works on the text, so time zones can't shift the day. */
+export const formatDate = (iso: string) => {
+  const [y, m, d] = iso.slice(0, 10).split("-");
+  return `${m}/${d}/${y}`;
+};
 
 export function presetRange(preset: Exclude<Preset, "custom">, today = new Date()): Range {
   const y = today.getFullYear();
@@ -61,10 +67,51 @@ export const cents = (amount: string) => Math.round(Number(amount) * 100);
 export const formatCents = (c: number) => (c / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
 export const categoryOf = (t: Transaction) => t.category ?? UNCATEGORIZED;
 
-/** Category filter: nothing selected keeps everything; otherwise only spending in those categories. */
-export function filterByCategories(txns: Transaction[], selected: string[]) {
+export type SortKey = "date" | "merchant" | "account" | "category" | "amount";
+export type SortDir = "asc" | "desc";
+type SortableRow = Pick<Transaction, "id" | "date" | "merchant" | "account" | "category" | "is_transfer" | "amount">;
+
+const sortValue = (t: SortableRow, key: SortKey): string | number => {
+  if (key === "amount") return cents(t.amount);
+  if (key === "category") return t.is_transfer ? "Transfer" : (t.category ?? UNCATEGORIZED);
+  return t[key];
+};
+
+/** Sorted copy of the rows. Amounts sort by signed value (ascending = largest spending first);
+ *  text ignores case. Ties fall back to newest first. */
+export function sortRows<T extends SortableRow>(rows: T[], key: SortKey, dir: SortDir): T[] {
+  const sign = dir === "asc" ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    const x = sortValue(a, key);
+    const y = sortValue(b, key);
+    const order =
+      typeof x === "number" && typeof y === "number"
+        ? x - y
+        : String(x).localeCompare(String(y), "en-US", { sensitivity: "base", numeric: true });
+    return order * sign || b.date.localeCompare(a.date) || b.id - a.id;
+  });
+}
+
+/** Subcategory name -> parent name (e.g. "Movies" -> "Entertainment"). */
+export type Parents = Map<string, string>;
+export const parentMap = (categories: Category[]): Parents =>
+  new Map(categories.flatMap((c) => (c.parent ? [[c.name, c.parent] as const] : [])));
+
+/** Key that rolls a subcategory up into its parent: Movies -> Entertainment. */
+export const topCategoryOf = (parents: Parents) => (t: Transaction) => {
+  const name = categoryOf(t);
+  return parents.get(name) ?? name;
+};
+
+/** Category filter: nothing selected keeps everything; otherwise only spending in those categories.
+ *  Selecting a parent also includes its subcategories. */
+export function filterByCategories(txns: Transaction[], selected: string[], parents: Parents = new Map()) {
   if (selected.length === 0) return txns;
-  return txns.filter((t) => !t.is_transfer && selected.includes(categoryOf(t)));
+  return txns.filter((t) => {
+    if (t.is_transfer) return false;
+    const name = categoryOf(t);
+    return selected.includes(name) || selected.includes(parents.get(name) ?? "");
+  });
 }
 
 /** Spending (positive cents) grouped by key, largest first. Transfers excluded; refunds reduce spending. */
@@ -83,22 +130,41 @@ export function spendBy(txns: Transaction[], key: (t: Transaction) => string): T
 export const totalSpent = (txns: Transaction[]) =>
   txns.reduce((sum, t) => (t.is_transfer ? sum : sum - cents(t.amount)), 0);
 
-/** Count and spending per category, including categories with nothing in range. */
-export function categoryStats(txns: Transaction[], allCategories: string[]) {
-  const stats = new Map<string, { count: number; cents: number }>(allCategories.map((c) => [c, { count: 0, cents: 0 }]));
+export type CategoryStat = { name: string; parent: string | null; count: number; cents: number };
+
+/** Count and spending per category, including categories with nothing in range. Parents come first
+ *  (largest spending first), each followed by its subcategories; a parent's totals include them. */
+export function categoryStats(txns: Transaction[], categories: Category[]): CategoryStat[] {
+  const own = new Map<string, { count: number; cents: number }>();
   for (const t of txns) {
     if (t.is_transfer) continue;
-    const s = stats.get(categoryOf(t)) ?? { count: 0, cents: 0 };
-    stats.set(categoryOf(t), { count: s.count + 1, cents: s.cents - cents(t.amount) });
+    const s = own.get(categoryOf(t)) ?? { count: 0, cents: 0 };
+    own.set(categoryOf(t), { count: s.count + 1, cents: s.cents - cents(t.amount) });
   }
-  return [...stats].map(([name, s]) => ({ name, ...s })).sort((a, b) => b.cents - a.cents || a.name.localeCompare(b.name));
+  const parents = parentMap(categories);
+  const names = [...new Set([...categories.map((c) => c.name), ...own.keys()])];
+  const stat = (name: string) => own.get(name) ?? { count: 0, cents: 0 };
+  const largestFirst = (a: CategoryStat, b: CategoryStat) => b.cents - a.cents || a.name.localeCompare(b.name);
+
+  const groups = names
+    .filter((name) => !parents.has(name))
+    .map((name) => {
+      const subs = names
+        .filter((sub) => parents.get(sub) === name)
+        .map((sub) => ({ name: sub, parent: name, ...stat(sub) }))
+        .sort(largestFirst);
+      const total = subs.reduce((sum, s) => ({ count: sum.count + s.count, cents: sum.cents + s.cents }), stat(name));
+      return { top: { name, parent: null, ...total }, subs };
+    })
+    .sort((a, b) => largestFirst(a.top, b.top));
+  return groups.flatMap((g) => [g.top, ...g.subs]);
 }
 
 /** Monthly spending stacked by the top categories; the rest are grouped as "Other". */
-export function monthlyByCategory(txns: Transaction[], maxSeries = 5) {
-  const top = spendBy(txns, categoryOf).slice(0, maxSeries).map((t) => t.name);
+export function monthlyByCategory(txns: Transaction[], key: (t: Transaction) => string = categoryOf, maxSeries = 5) {
+  const top = spendBy(txns, key).slice(0, maxSeries).map((t) => t.name);
   const spending = txns.filter((t) => !t.is_transfer);
-  const hasOther = spending.some((t) => !top.includes(categoryOf(t)));
+  const hasOther = spending.some((t) => !top.includes(key(t)));
   const series = hasOther ? [...top, "Other"] : top;
   if (spending.length === 0) return { series, data: [] };
 
@@ -107,7 +173,7 @@ export function monthlyByCategory(txns: Transaction[], maxSeries = 5) {
   for (let m = months[months.length - 1]; m >= months[0]; m = prevMonth(m)) buckets.set(m, new Map());
   for (const t of spending) {
     const bucket = buckets.get(t.date.slice(0, 7))!;
-    const name = top.includes(categoryOf(t)) ? categoryOf(t) : "Other";
+    const name = top.includes(key(t)) ? key(t) : "Other";
     bucket.set(name, (bucket.get(name) ?? 0) - cents(t.amount));
   }
   const data = [...buckets]

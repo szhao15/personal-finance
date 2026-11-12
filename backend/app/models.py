@@ -22,6 +22,8 @@ class Category(Base):
     __tablename__ = "categories"
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(unique=True)
+    # Set for a subcategory (e.g. Movies -> Entertainment). One level only: a parent has no parent.
+    parent_id: Mapped[int | None] = mapped_column(ForeignKey("categories.id", ondelete="SET NULL"))
 
 
 class Rule(Base):
